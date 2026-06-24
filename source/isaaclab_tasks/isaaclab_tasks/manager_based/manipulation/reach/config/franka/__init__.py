@@ -89,3 +89,6 @@ gym.register(
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:FrankaReachPPORunnerCfg",
     },
 )
+gym.register(id="Isaac-Reach-Franka-DualArm-v0", entry_point="isaaclab.envs:ManagerBasedRLEnv", disable_env_checker=True, kwargs={"env_cfg_entry_point": f"{__name__}.dual_arm_env_cfg:FrankaDualArmReachEnvCfg", "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml"})
+gym.register(id="Isaac-Reach-Franka-DualArm-Step2-v0", entry_point="isaaclab.envs:ManagerBasedRLEnv", disable_env_checker=True, kwargs={"env_cfg_entry_point": f"{__name__}.dual_arm_step2_env_cfg:FrankaDualArmStep2EnvCfg", "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml"})
+gym.register(id="Isaac-Reach-Franka-DualArm-RealTable-v0", entry_point="isaaclab.envs:ManagerBasedRLEnv", disable_env_checker=True, kwargs={"env_cfg_entry_point": f"{__name__}.dual_arm_realtable_env_cfg:FrankaDualArmRealTableEnvCfg", "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml"})
