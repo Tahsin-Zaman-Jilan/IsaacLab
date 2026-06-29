@@ -106,3 +106,16 @@ gym.register(
     },
     disable_env_checker=True,
 )
+
+##
+# Vertical-Lift Fixed-Mount Reach - IK Relative (elevated base + real Z lift joint)
+##
+
+gym.register(
+    id="VerticalLift-FixedMount-Franka-IK-Rel-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.vertical_lift_reach_env_cfg:FrankaVerticalLiftReachEnvCfg",
+    },
+    disable_env_checker=True,
+)

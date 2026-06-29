@@ -28,10 +28,13 @@ class Se3Keyboard(DeviceBase):
     It uses the Omniverse keyboard interface to listen to keyboard events and map them to robot's
     task-space commands.
 
-    The command comprises of two parts:
+    The command comprises of two parts, plus an optional third:
 
     * delta pose: a 6D vector of (x, y, z, roll, pitch, yaw) in meters and radians.
     * gripper: a binary command to open or close the gripper.
+    * lift (opt-in via :attr:`Se3KeyboardCfg.lift_term`): a 1D delta along world Z, in meters,
+      for use as a separate action term (e.g. a virtual torso/base lift joint) alongside the
+      pose command above. Disabled by default; existing tasks are unaffected.
 
     Key bindings:
         ============================== ================= =================
@@ -44,6 +47,7 @@ class Se3Keyboard(DeviceBase):
         Rotate along x-axis            Z                 X
         Rotate along y-axis            T                 G
         Rotate along z-axis            C                 V
+        Move along lift-axis (opt-in)  U                 J
         ============================== ================= =================
 
     .. seealso::
@@ -62,6 +66,7 @@ class Se3Keyboard(DeviceBase):
         self.pos_sensitivity = cfg.pos_sensitivity
         self.rot_sensitivity = cfg.rot_sensitivity
         self.gripper_term = cfg.gripper_term
+        self.lift_term = cfg.lift_term
         self._sim_device = cfg.sim_device
         # acquire omniverse interfaces
         self._appwindow = omni.appwindow.get_default_app_window()
@@ -78,6 +83,7 @@ class Se3Keyboard(DeviceBase):
         self._close_gripper = False
         self._delta_pos = np.zeros(3)  # (x, y, z)
         self._delta_rot = np.zeros(3)  # (roll, pitch, yaw)
+        self._delta_lift = np.zeros(1)  # (z, virtual torso lift)
         # dictionary for additional callbacks
         self._additional_callbacks = dict()
 
@@ -98,6 +104,8 @@ class Se3Keyboard(DeviceBase):
         msg += "\tRotate arm along x-axis: Z/X\n"
         msg += "\tRotate arm along y-axis: T/G\n"
         msg += "\tRotate arm along z-axis: C/V"
+        if self.lift_term:
+            msg += "\n\tMove along lift-axis: U/J"
         return msg
 
     """
@@ -109,6 +117,7 @@ class Se3Keyboard(DeviceBase):
         self._close_gripper = False
         self._delta_pos = np.zeros(3)  # (x, y, z)
         self._delta_rot = np.zeros(3)  # (roll, pitch, yaw)
+        self._delta_lift = np.zeros(1)  # (z, virtual torso lift)
 
     def add_callback(self, key: str, func: Callable):
         """Add additional functions to bind keyboard.
@@ -127,9 +136,11 @@ class Se3Keyboard(DeviceBase):
         """Provides the result from keyboard event state.
 
         Returns:
-            torch.Tensor: A 7-element tensor containing:
+            torch.Tensor: A tensor containing:
                 - delta pose: First 6 elements as [x, y, z, rx, ry, rz] in meters and radians.
-                - gripper command: Last element as a binary value (+1.0 for open, -1.0 for close).
+                - gripper command (if ``cfg.gripper_term``): next element, a binary value
+                  (+1.0 for open, -1.0 for close).
+                - lift delta (if ``cfg.lift_term``): final element, a continuous value in meters.
         """
         # convert to rotation vector
         rot_vec = Rotation.from_euler("XYZ", self._delta_rot).as_rotvec()
@@ -138,6 +149,8 @@ class Se3Keyboard(DeviceBase):
         if self.gripper_term:
             gripper_value = -1.0 if self._close_gripper else 1.0
             command = np.append(command, gripper_value)
+        if self.lift_term:
+            command = np.append(command, self._delta_lift)
 
         return torch.tensor(command, dtype=torch.float32, device=self._sim_device)
 
@@ -161,12 +174,16 @@ class Se3Keyboard(DeviceBase):
                 self._delta_pos += self._INPUT_KEY_MAPPING[event.input.name]
             elif event.input.name in ["Z", "X", "T", "G", "C", "V"]:
                 self._delta_rot += self._INPUT_KEY_MAPPING[event.input.name]
+            elif self.lift_term and event.input.name in ["U", "J"]:
+                self._delta_lift += self._INPUT_KEY_MAPPING[event.input.name]
         # remove the command when un-pressed
         if event.type == carb.input.KeyboardEventType.KEY_RELEASE:
             if event.input.name in ["W", "S", "A", "D", "Q", "E"]:
                 self._delta_pos -= self._INPUT_KEY_MAPPING[event.input.name]
             elif event.input.name in ["Z", "X", "T", "G", "C", "V"]:
                 self._delta_rot -= self._INPUT_KEY_MAPPING[event.input.name]
+            elif self.lift_term and event.input.name in ["U", "J"]:
+                self._delta_lift -= self._INPUT_KEY_MAPPING[event.input.name]
         # additional callbacks
         if event.type == carb.input.KeyboardEventType.KEY_PRESS:
             if event.input.name in self._additional_callbacks:
@@ -198,6 +215,9 @@ class Se3Keyboard(DeviceBase):
             # yaw (around z-axis)
             "C": np.asarray([0.0, 0.0, 1.0]) * self.rot_sensitivity,
             "V": np.asarray([0.0, 0.0, -1.0]) * self.rot_sensitivity,
+            # lift-axis (virtual torso, world Z), opt-in via cfg.lift_term
+            "U": np.asarray([1.0]) * self.pos_sensitivity,
+            "J": np.asarray([-1.0]) * self.pos_sensitivity,
         }
 
 
@@ -206,6 +226,7 @@ class Se3KeyboardCfg(DeviceCfg):
     """Configuration for SE3 keyboard devices."""
 
     gripper_term: bool = True
+    lift_term: bool = False
     pos_sensitivity: float = 0.4
     rot_sensitivity: float = 0.8
     retargeters: None = None
