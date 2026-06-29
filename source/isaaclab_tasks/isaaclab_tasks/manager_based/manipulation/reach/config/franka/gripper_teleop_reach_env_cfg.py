@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from isaaclab.assets import RigidObjectCfg
+from isaaclab.devices import DevicesCfg, Se3GamepadCfg, Se3KeyboardCfg, Se3SpaceMouseCfg
 from isaaclab.envs.mdp.actions.actions_cfg import BinaryJointPositionActionCfg
 from isaaclab.sim.schemas.schemas_cfg import RigidBodyPropertiesCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
@@ -57,4 +58,27 @@ class FrankaGripperTeleopReachEnvCfg(FrankaFixedMountReachEnvCfg):
                     disable_gravity=False,
                 ),
             ),
+        )
+
+        # ReachEnvCfg.__post_init__ hardcodes gripper_term=False for all teleop devices, since the
+        # base Reach task has no gripper to control. That override is inherited verbatim through
+        # FrankaReachEnvCfg -> FrankaFixedMountReachEnvCfg -> here, so it's now stale: it would
+        # silently truncate Se3Keyboard/Se3Gamepad/Se3SpaceMouse.advance() to 6 elements regardless
+        # of the K toggle, while this class's action space expects 7 (arm + gripper). Re-override it
+        # here, scoped to this class only, so teleop devices include the gripper bit again.
+        self.teleop_devices = DevicesCfg(
+            devices={
+                "keyboard": Se3KeyboardCfg(
+                    gripper_term=True,
+                    sim_device=self.sim.device,
+                ),
+                "gamepad": Se3GamepadCfg(
+                    gripper_term=True,
+                    sim_device=self.sim.device,
+                ),
+                "spacemouse": Se3SpaceMouseCfg(
+                    gripper_term=True,
+                    sim_device=self.sim.device,
+                ),
+            },
         )
