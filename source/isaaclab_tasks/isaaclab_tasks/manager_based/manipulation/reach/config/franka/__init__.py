@@ -93,3 +93,16 @@ gym.register(id="Isaac-Reach-Franka-DualArm-v0", entry_point="isaaclab.envs:Mana
 gym.register(id="Isaac-Reach-Franka-DualArm-Step2-v0", entry_point="isaaclab.envs:ManagerBasedRLEnv", disable_env_checker=True, kwargs={"env_cfg_entry_point": f"{__name__}.dual_arm_step2_env_cfg:FrankaDualArmStep2EnvCfg", "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml"})
 gym.register(id="Isaac-Reach-Franka-DualArm-RealTable-v0", entry_point="isaaclab.envs:ManagerBasedRLEnv", disable_env_checker=True, kwargs={"env_cfg_entry_point": f"{__name__}.dual_arm_realtable_env_cfg:FrankaDualArmRealTableEnvCfg", "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml"})
 gym.register(id="Isaac-Reach-Franka-SingleArm-RealTable-v0", entry_point="isaaclab.envs:ManagerBasedRLEnv", disable_env_checker=True, kwargs={"env_cfg_entry_point": f"{__name__}.single_arm_realtable_env_cfg:FrankaSingleArmRealTableEnvCfg", "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml"})
+
+##
+# Fixed-Mount Reach - IK Relative (elevated, downward-pointing base)
+##
+
+gym.register(
+    id="FixedMount-Reach-Franka-IK-Rel-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.fixed_mount_reach_env_cfg:FrankaFixedMountReachEnvCfg",
+    },
+    disable_env_checker=True,
+)
