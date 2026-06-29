@@ -132,3 +132,18 @@ gym.register(
     },
     disable_env_checker=True,
 )
+
+##
+# Vertical-Lift Fixed-Mount Reach with gripper teleop control (combines both)
+##
+
+gym.register(
+    id="VerticalLiftGripper-FixedMount-Franka-IK-Rel-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.vertical_lift_gripper_teleop_reach_env_cfg:FrankaVerticalLiftGripperTeleopReachEnvCfg"
+        ),
+    },
+    disable_env_checker=True,
+)
