@@ -108,6 +108,19 @@ gym.register(
 )
 
 ##
+# Fixed-Mount Reach with gripper teleop control + graspable cube
+##
+
+gym.register(
+    id="GripperTeleop-FixedMount-Franka-IK-Rel-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.gripper_teleop_reach_env_cfg:FrankaGripperTeleopReachEnvCfg",
+    },
+    disable_env_checker=True,
+)
+
+##
 # Vertical-Lift Fixed-Mount Reach - IK Relative (elevated base + real Z lift joint)
 ##
 
