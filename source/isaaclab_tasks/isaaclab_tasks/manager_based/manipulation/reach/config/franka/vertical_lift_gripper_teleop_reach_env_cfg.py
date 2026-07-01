@@ -5,7 +5,9 @@
 
 import os
 
+import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
+from isaaclab.assets import AssetBaseCfg
 from isaaclab.devices import DevicesCfg, Se3GamepadCfg, Se3KeyboardCfg, Se3SpaceMouseCfg
 from isaaclab.envs.mdp.actions.actions_cfg import RelativeJointPositionActionCfg
 from isaaclab.utils import configclass
@@ -105,4 +107,22 @@ class FrankaVerticalLiftGripperTeleopReachEnvCfg(FrankaGripperTeleopReachEnvCfg)
                     sim_device=self.sim.device,
                 ),
             },
+        )
+
+        # --- FR3 transparent box (visual-only, no physics) ---
+        # FR3_v2.usd is Y-up and geometry is authored in centimeters.
+        # scale=(0.01, 0.01, 0.01) converts cm → meters.
+        # rot=(0.7071, 0.7071, 0, 0) is +90° around X, converting Y-up → Z-up so
+        # the box stands upright with its opening facing +Z.
+        # pos is a starting guess; tune visually after launch.
+        self.scene.fr3_box = AssetBaseCfg(
+            prim_path="{ENV_REGEX_NS}/FR3Box",
+            spawn=sim_utils.UsdFileCfg(
+                usd_path="/home/exx/Tahsin/tahsin/FR3_v2.usd",
+                scale=(0.01, 0.01, 0.01),
+            ),
+            init_state=AssetBaseCfg.InitialStateCfg(
+                pos=(0.5, 0.0, 0.0),
+                rot=(0.7071, 0.7071, 0.0, 0.0),
+            ),
         )
