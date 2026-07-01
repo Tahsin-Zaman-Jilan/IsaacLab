@@ -124,6 +124,12 @@ class FrankaVerticalLiftGripperTeleopReachEnvCfg(FrankaGripperTeleopReachEnvCfg)
             spawn=sim_utils.UsdFileCfg(
                 usd_path="/home/exx/Tahsin/tahsin/FR3_v2.usd",
                 scale=(1.0, 1.0, 1.0),
+                # OmniGlass.mdl: physically-based glass with IOR + refraction,
+                # replaces the basic UsdPreviewSurface baked into the USD.
+                visual_material=sim_utils.GlassMdlCfg(
+                    glass_color=(0.8, 0.9, 1.0),
+                    glass_ior=1.52,
+                ),
             ),
             init_state=AssetBaseCfg.InitialStateCfg(
                 pos=(1.5, 0.0, 0.0),
