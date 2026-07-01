@@ -110,19 +110,23 @@ class FrankaVerticalLiftGripperTeleopReachEnvCfg(FrankaGripperTeleopReachEnvCfg)
         )
 
         # --- FR3 transparent box (visual-only, no physics) ---
-        # FR3_v2.usd is Y-up and geometry is authored in centimeters.
-        # scale=(0.01, 0.01, 0.01) converts cm → meters.
+        # FR3_v2.usd is Y-up. The OBJ source was in mm, exported at 1/1000, so raw
+        # USD coordinates (e.g. ±1 in X) already represent meters in real space —
+        # scale=(1, 1, 1) gives the correct ~2 m × 3 m × 0.75 m box.
         # rot=(0.7071, 0.7071, 0, 0) is +90° around X, converting Y-up → Z-up so
         # the box stands upright with its opening facing +Z.
-        # pos is a starting guess; tune visually after launch.
+        # The Box_v2 child inside the USD has an internal translate of (-1.35, 0, 0.195)
+        # in USD coords; after the rotation that shifts the geometry ~1.35 m in -X from
+        # the root, so pos=(1.5, 0, 0) centres the box at roughly X ≈ 0.15 m.
+        # Tune scale and pos visually after launch.
         self.scene.fr3_box = AssetBaseCfg(
             prim_path="{ENV_REGEX_NS}/FR3Box",
             spawn=sim_utils.UsdFileCfg(
                 usd_path="/home/exx/Tahsin/tahsin/FR3_v2.usd",
-                scale=(0.01, 0.01, 0.01),
+                scale=(1.0, 1.0, 1.0),
             ),
             init_state=AssetBaseCfg.InitialStateCfg(
-                pos=(0.5, 0.0, 0.0),
+                pos=(1.5, 0.0, 0.0),
                 rot=(0.7071, 0.7071, 0.0, 0.0),
             ),
         )
