@@ -75,3 +75,16 @@ gym.register(
     },
     disable_env_checker=True,
 )
+
+##
+# Step 1 (look-through-perception rebuild): upside-down mount, table removed, straight default pose
+##
+
+gym.register(
+    id="Isaac-Lift-Cube-Franka-Upside-Down-No-Table-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.upside_down_no_table_env_cfg:FrankaCubeLiftUpsideDownNoTableEnvCfg",
+    },
+    disable_env_checker=True,
+)
