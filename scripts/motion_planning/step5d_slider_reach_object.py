@@ -3,47 +3,29 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Motion-planning Step 5c: slider target picking + cuRobo motion planning, combining the two
-confirmed-working pieces from step5b_slider_no_live_move.py and step2_single_target_motion_plan.py.
+"""Motion-planning Step 5d: slider target picking + cuRobo motion planning, with a real object in
+the scene to reach toward -- building directly on step5c_slider_motion_plan.py's pipeline
+(tightened reach-verified slider ranges, single "Confirm Target" button, save/restore, cuRobo
+motion planning). step5c is otherwise unchanged; this is copied into a new file.
 
-Same bare, ground-mounted robot scene as every prior step (ground plane, one light, one Franka arm
--- no cube, no table, no upside-down mounting). Per the advisor's "simplest domain first"
-instruction, this step deliberately stays on the simplest possible scene while adding the one new
-thing being tested: feeding a slider-picked target into cuRobo.
+Adds ONE small cube to the bare scene, at a fixed, KNOWN position comfortably inside the already
+reach-verified slider ranges (POS_X_RANGE=(0.2,0.5), POS_Y_RANGE=(-0.25,0.25), POS_Z_RANGE=
+(0.0,0.5)) -- so there is something concrete to visibly reach toward. This step is about REACHING
+near/at the object to demonstrate arrival, not grasping it -- no gripper-close logic here.
 
-Ordering discipline (the advisor's explicit instruction, confirmed before implementing): on
-"Confirm Target", the saved baseline state is RESTORED FIRST via scene.reset_to() + sim.forward(),
-and ONLY THEN is the cuRobo planning start_state read from robot.data.joint_pos -- freshly, post-
-restore. The plan is computed from the restored baseline, never from whatever state existed right
-before the click. Since step5b already proved the robot cannot drift while the sliders are up, the
-restored state and the pre-confirm state are numerically identical -- but the code path enforces
-this ordering regardless, rather than assuming it.
-
-Combines:
-  1. From step5b_slider_no_live_move.py: SliderTargetWindow (X/Y/Z sliders, zero side effects on
-     the robot, "Confirm Target" button) and the save/restore mechanism
-     (scene.get_state() / scene.reset_to() + sim.forward()).
-  2. From step2_single_target_motion_plan.py: the CUDA_VISIBLE_DEVICES=1 guard, cuRobo's MotionGen
-     pipeline (franka.yml + dummy far-away obstacle), plan_single(), the [PLAN] SUCCESS/FAILED
-     discipline, and automatic waypoint execution.
-
-Flow:
-  1. Reset to default pose, save this state (baseline). Build + warm up cuRobo's MotionGen (a
-     one-time, robot-state-independent construction -- doing this before the slider loop does not
-     violate the reset-before-plan ordering, since no planning call happens here).
-  2. Show sliders. User drags to pick a target position -- the robot stays frozen the whole time
-     (5b's zero-side-effect guarantee); every physics step verifies no drift against the baseline.
-  3. User clicks "Confirm Target".
-  4. On confirm: print the confirmed target, restore the saved baseline
-     (scene.reset_to(saved_state) + sim.forward()), THEN read the post-restore joint state as
-     cuRobo's start_state, THEN plan to the confirmed target.
-  5. Print [PLAN] SUCCESS/FAILED. If successful, execute the planned trajectory automatically
-     (no manual driving) -- same waypoint-stepping pattern as step2.
-  6. After execution, print the final achieved EE position and error vs. the requested target.
+Requirements satisfied:
+  1. The cube's exact spawn position is printed at startup (both world frame and the robot's base
+     frame -- the same frame every slider value, saved state, and cuRobo target already uses
+     throughout this project), so it's a known, verified number, not a viewport guess.
+  2. After the user picks a target via slider (ideally near the cube) and the plan executes, the
+     final EE position is printed along with its distance to BOTH the originally-requested slider
+     target (same as step5c) AND, separately, the cube's actual position -- "did we get close to
+     the object" is a printed number, not inferred from the target-error number.
+  3. The tightened, reach-verified slider ranges from step5c are unchanged.
 
 .. code-block:: bash
 
-    CUDA_VISIBLE_DEVICES=1 ./isaaclab.sh -p scripts/motion_planning/step5c_slider_motion_plan.py \
+    CUDA_VISIBLE_DEVICES=1 ./isaaclab.sh -p scripts/motion_planning/step5d_slider_reach_object.py \
         --device cuda:0
 
 """
@@ -64,7 +46,7 @@ if os.environ.get("CUDA_VISIBLE_DEVICES") != "1":
         " reserved for Hangong's work, and cuRobo's internal device handling only works"
         " reliably here under single-GPU process isolation). Run as:\n"
         "    CUDA_VISIBLE_DEVICES=1 ./isaaclab.sh -p"
-        " scripts/motion_planning/step5c_slider_motion_plan.py --device cuda:0"
+        " scripts/motion_planning/step5d_slider_reach_object.py --device cuda:0"
     )
     sys.exit(1)
 
@@ -72,7 +54,7 @@ import argparse
 
 from isaaclab.app import AppLauncher
 
-parser = argparse.ArgumentParser(description="Step 5c: slider target picking + cuRobo motion planning.")
+parser = argparse.ArgumentParser(description="Step 5d: slider target picking + cuRobo motion planning, reach-to-object.")
 AppLauncher.add_app_launcher_args(parser)
 # under the CUDA_VISIBLE_DEVICES=1 isolation enforced above, physical GPU1 (cuda:1) is
 # remapped to index 0 for this process -- so cuda:0 here is the correct, safe target
@@ -100,7 +82,7 @@ if torch.cuda.device_count() != 1:
 
 import isaaclab.sim as sim_utils
 import isaaclab.utils.math as math_utils
-from isaaclab.assets import AssetBaseCfg
+from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
 from isaaclab.utils import configclass
@@ -125,6 +107,7 @@ GRIPPER_OPEN = 0.04
 # combination outright). X's lower bound (0.2) avoids the near-base self-collision zone; Z's lower
 # bound (0.0) matches the floor-collision boundary already established in step3
 # (ground_collision_test.py's TEST1 shows Z<0 fails due to the ground plane, not reach).
+# Unchanged from step5c.
 POS_X_RANGE = (0.2, 0.5)
 POS_Y_RANGE = (-0.25, 0.25)
 POS_Z_RANGE = (0.0, 0.5)
@@ -139,7 +122,9 @@ DRIFT_TOL_RAD = 1e-3
 
 # cuRobo's collision checker requires at least one registered primitive obstacle -- a genuinely
 # empty world dict raises "Primitive Collision has no obstacles". This dummy cuboid is placed
-# 100m away, far outside the Franka's ~0.85m reach: functionally an obstacle-free world.
+# 100m away, far outside the Franka's ~0.85m reach: functionally an obstacle-free world. The real
+# cube added to the scene below is NOT registered here -- collision-aware planning around it is
+# out of scope for this step (just reaching near it, not avoiding/grasping it).
 DUMMY_FAR_AWAY_WORLD = {
     "cuboid": {
         "dummy_far_away": {
@@ -149,10 +134,18 @@ DUMMY_FAR_AWAY_WORLD = {
     }
 }
 
+# Cube: small, fixed, KNOWN position comfortably inside all three slider ranges above (not near
+# any edge -- this is meant to be an easy, unambiguous first "reach toward an object" target, not
+# another reach-limit stress test). Size 0.05m with Z=0.025 puts its bottom face exactly on the
+# Z=0 ground plane (half the cube height above it), so it settles naturally under normal
+# gravity/collision physics instead of floating or clipping through the floor.
+CUBE_SIZE = (0.05, 0.05, 0.05)
+CUBE_POSITION = (0.35, 0.0, 0.025)
+
 
 @configclass
 class BareRobotSceneCfg(InteractiveSceneCfg):
-    """Minimal scene: ground plane, light, single Franka. No other objects."""
+    """Bare scene (ground plane, light, single Franka) plus one fixed cube to reach toward."""
 
     ground = AssetBaseCfg(prim_path="/World/defaultGroundPlane", spawn=sim_utils.GroundPlaneCfg())
     dome_light = AssetBaseCfg(
@@ -160,6 +153,18 @@ class BareRobotSceneCfg(InteractiveSceneCfg):
     )
 
     robot = FRANKA_PANDA_HIGH_PD_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+
+    cube = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/Cube",
+        spawn=sim_utils.CuboidCfg(
+            size=CUBE_SIZE,
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(),
+            mass_props=sim_utils.MassPropertiesCfg(mass=0.1),
+            collision_props=sim_utils.CollisionPropertiesCfg(),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.1, 0.1)),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=CUBE_POSITION),
+    )
 
 
 def reset_to_default_pose(sim: sim_utils.SimulationContext, scene: InteractiveScene, robot) -> None:
@@ -181,10 +186,11 @@ class SliderTargetWindow:
     """
     Slider UI that only ever picks a target -- it never drives the robot.
 
-    Copied unchanged from step5b_slider_no_live_move.py: there is no reference to the robot's
-    write_*/set_*_target methods anywhere in this class. Reading the sliders (read_target_pos) is
-    a pure UI read; the only things it feeds are the displayed label (update_label) and the
-    confirmed-target snapshot taken on button click (_on_confirm). Neither touches the simulation.
+    Copied unchanged from step5c_slider_motion_plan.py (itself copied from
+    step5b_slider_no_live_move.py): there is no reference to the robot's write_*/set_*_target
+    methods anywhere in this class. Reading the sliders (read_target_pos) is a pure UI read; the
+    only things it feeds are the displayed label (update_label) and the confirmed-target snapshot
+    taken on button click (_on_confirm). Neither touches the simulation.
     """
 
     def __init__(self, robot, ee_body_idx: int, env_id: int = 0):
@@ -267,6 +273,7 @@ class SliderTargetWindow:
 
 def run_test(sim: sim_utils.SimulationContext, scene: InteractiveScene) -> None:
     robot = scene["robot"]
+    cube = scene["cube"]
     print(f"[INFO] Scene ready. Entities: {list(scene.keys())}")
     print(f"[INFO] Robot '{robot.cfg.prim_path}' spawned with {robot.num_joints} joints.")
 
@@ -276,6 +283,24 @@ def run_test(sim: sim_utils.SimulationContext, scene: InteractiveScene) -> None:
     arm_joint_ids = robot_entity_cfg.joint_ids
     ee_body_idx = robot_entity_cfg.body_ids[0]
     sim_dt = sim.get_physics_dt()
+
+    # ------------------------------------------------------------------
+    # STEP 0: print the cube's exact spawn position -- world frame and the robot's base frame
+    # (the same frame every slider value, saved state, and cuRobo target already uses).
+    # ------------------------------------------------------------------
+    cube_pos_w = cube.data.root_pos_w[0].clone()
+    root_pose_w = robot.data.root_pose_w
+    # cube_pos_b only depends on root_pose_w and cube_pos_w; the quaternion arg here is the
+    # cube's "orientation" input to the transform helper, but since we discard the returned
+    # orientation (only position is meaningful for a cube centroid), passing the robot's own
+    # quat as a harmless placeholder does not affect the position result.
+    cube_pos_b, _ = subtract_frame_transforms(
+        root_pose_w[:, 0:3], root_pose_w[:, 3:7],
+        cube_pos_w.unsqueeze(0), root_pose_w[:, 3:7],
+    )
+    print(f"\n[STEP 0] Cube spawn position (world frame): {cube_pos_w.cpu().numpy().tolist()}")
+    print(f"[STEP 0] Cube spawn position (robot base frame): {cube_pos_b[0].cpu().numpy().tolist()}")
+    cube_pos_b = cube_pos_b[0]
 
     # ------------------------------------------------------------------
     # STEP 1: reset to default pose, save baseline, build + warm up cuRobo's planner.
@@ -305,7 +330,8 @@ def run_test(sim: sim_utils.SimulationContext, scene: InteractiveScene) -> None:
     # ------------------------------------------------------------------
     window = SliderTargetWindow(robot, ee_body_idx=ee_body_idx)
     window.build_ui()
-    print("\n[STEP 2] Sliders shown. Drag to pick a target -- the robot will not move.")
+    print("\n[STEP 2] Sliders shown. Drag to pick a target near the cube -- the robot will not move.")
+    print(f"[STEP 2] Cube is at (base frame) {cube_pos_b.cpu().numpy().tolist()} -- aim sliders near there.")
     print("[STEP 3] Verifying every physics step that the robot stays at the saved baseline...")
 
     while simulation_app.is_running() and not window.confirmed:
@@ -333,7 +359,7 @@ def run_test(sim: sim_utils.SimulationContext, scene: InteractiveScene) -> None:
     print(f"\n[STEP 4] Final confirmed target pose (base frame): {target_pos_t.cpu().numpy().tolist()}")
 
     scene.reset_to(saved_state)
-    sim.forward()  # kinematics-only update, no physics step -- same pattern as step5a/5b
+    sim.forward()  # kinematics-only update, no physics step -- same pattern as step5a/5b/5c
     restored_joint_pos = robot.data.joint_pos[0, arm_joint_ids]
     restore_diff = (restored_joint_pos - saved_joint_pos).abs().max().item()
     print(f"[STEP 4] Restored baseline. Post-restore joint_pos: {restored_joint_pos.cpu().numpy().tolist()}")
@@ -386,15 +412,19 @@ def run_test(sim: sim_utils.SimulationContext, scene: InteractiveScene) -> None:
     print("[EXEC] Trajectory execution complete.")
 
     # ------------------------------------------------------------------
-    # STEP 6: verify the achieved pose against the requested target, with actual numbers.
+    # STEP 6: verify the achieved pose against BOTH the requested slider target AND the cube's
+    # actual position -- two separate numbers, not one inferred from the other.
     # ------------------------------------------------------------------
     root_pose_w = robot.data.root_pose_w
     ee_pose_w = robot.data.body_pose_w[:, ee_body_idx]
     ee_pos_b, _ = subtract_frame_transforms(
         root_pose_w[:, 0:3], root_pose_w[:, 3:7], ee_pose_w[:, 0:3], ee_pose_w[:, 3:7]
     )
-    pos_error = torch.norm(ee_pos_b[0] - target_pos_t.to(sim.device)).item()
-    print(f"[RESULT] Final EE position (base frame): {ee_pos_b[0].tolist()}, position error: {pos_error:.4f} m")
+    target_error = torch.norm(ee_pos_b[0] - target_pos_t.to(sim.device)).item()
+    cube_error = torch.norm(ee_pos_b[0] - cube_pos_b.to(sim.device)).item()
+    print(f"[RESULT] Final EE position (base frame): {ee_pos_b[0].tolist()}")
+    print(f"[RESULT] Distance to requested slider target: {target_error:.4f} m")
+    print(f"[RESULT] Distance to cube's actual position:  {cube_error:.4f} m")
 
     window.close()
     print("\n[INFO] Test complete. Holding final pose. Close the viewer window to exit.")
@@ -413,7 +443,7 @@ def main() -> None:
         scene = InteractiveScene(scene_cfg)
 
         sim.reset()
-        print("[INFO] Setup complete. Bare Franka scene created (no cube, no table, no extra objects).")
+        print("[INFO] Setup complete. Bare Franka scene created, plus one fixed cube to reach toward.")
     except Exception as e:
         print(f"[ERROR] Failed to set up simulation/scene: {e}")
         simulation_app.close()
@@ -422,7 +452,7 @@ def main() -> None:
     try:
         run_test(sim, scene)
     except Exception as e:
-        print(f"[ERROR] Slider motion-plan test failed: {e}")
+        print(f"[ERROR] Slider reach-object test failed: {e}")
 
 
 if __name__ == "__main__":

@@ -3,47 +3,28 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Motion-planning Step 5c: slider target picking + cuRobo motion planning, combining the two
-confirmed-working pieces from step5b_slider_no_live_move.py and step2_single_target_motion_plan.py.
+"""Motion-planning Step 6a: slider target picking + cuRobo motion planning, with the planned
+trajectory SAVED to disk before execution -- built directly on step5c_slider_motion_plan.py's
+pipeline (bare ground robot, single "Confirm Target" slider gate, save/restore, cuRobo planning
+and execution). step5c is unchanged; this is copied into a new file.
 
-Same bare, ground-mounted robot scene as every prior step (ground plane, one light, one Franka arm
--- no cube, no table, no upside-down mounting). Per the advisor's "simplest domain first"
-instruction, this step deliberately stays on the simplest possible scene while adding the one new
-thing being tested: feeding a slider-picked target into cuRobo.
+The ONE new thing: after result.success == True and before executing, the full planned
+trajectory is saved using cuRobo's OWN native trajectory export -- not an invented format.
+Checked directly in cuRobo's source (JointState, MotionGenResult): neither has a built-in
+to_dict()/to_json()/save() method. The one thing cuRobo does ship, and actually uses in its own
+example (examples/motion_gen_api_example.py), is
+curobo.util.usd_helper.UsdHelper.write_trajectory_animation_with_robot_usd(...) -- a labeled USD
+animation (joint names attached to keyframed drive targets, one keyframe per interpolated
+waypoint), not a bare .npy array. This script calls that exact function the same way cuRobo's own
+example does.
 
-Ordering discipline (the advisor's explicit instruction, confirmed before implementing): on
-"Confirm Target", the saved baseline state is RESTORED FIRST via scene.reset_to() + sim.forward(),
-and ONLY THEN is the cuRobo planning start_state read from robot.data.joint_pos -- freshly, post-
-restore. The plan is computed from the restored baseline, never from whatever state existed right
-before the click. Since step5b already proved the robot cannot drift while the sliders are up, the
-restored state and the pre-confirm state are numerically identical -- but the code path enforces
-this ordering regardless, rather than assuming it.
-
-Combines:
-  1. From step5b_slider_no_live_move.py: SliderTargetWindow (X/Y/Z sliders, zero side effects on
-     the robot, "Confirm Target" button) and the save/restore mechanism
-     (scene.get_state() / scene.reset_to() + sim.forward()).
-  2. From step2_single_target_motion_plan.py: the CUDA_VISIBLE_DEVICES=1 guard, cuRobo's MotionGen
-     pipeline (franka.yml + dummy far-away obstacle), plan_single(), the [PLAN] SUCCESS/FAILED
-     discipline, and automatic waypoint execution.
-
-Flow:
-  1. Reset to default pose, save this state (baseline). Build + warm up cuRobo's MotionGen (a
-     one-time, robot-state-independent construction -- doing this before the slider loop does not
-     violate the reset-before-plan ordering, since no planning call happens here).
-  2. Show sliders. User drags to pick a target position -- the robot stays frozen the whole time
-     (5b's zero-side-effect guarantee); every physics step verifies no drift against the baseline.
-  3. User clicks "Confirm Target".
-  4. On confirm: print the confirmed target, restore the saved baseline
-     (scene.reset_to(saved_state) + sim.forward()), THEN read the post-restore joint state as
-     cuRobo's start_state, THEN plan to the confirmed target.
-  5. Print [PLAN] SUCCESS/FAILED. If successful, execute the planned trajectory automatically
-     (no manual driving) -- same waypoint-stepping pattern as step2.
-  6. After execution, print the final achieved EE position and error vs. the requested target.
+Saving is purely additive: it happens after planning succeeds and before execution, and does not
+change any existing step5c behavior. The trajectory still executes live afterward exactly as in
+step5c.
 
 .. code-block:: bash
 
-    CUDA_VISIBLE_DEVICES=1 ./isaaclab.sh -p scripts/motion_planning/step5c_slider_motion_plan.py \
+    CUDA_VISIBLE_DEVICES=1 ./isaaclab.sh -p scripts/motion_planning/step6a_save_trajectory.py \
         --device cuda:0
 
 """
@@ -64,7 +45,7 @@ if os.environ.get("CUDA_VISIBLE_DEVICES") != "1":
         " reserved for Hangong's work, and cuRobo's internal device handling only works"
         " reliably here under single-GPU process isolation). Run as:\n"
         "    CUDA_VISIBLE_DEVICES=1 ./isaaclab.sh -p"
-        " scripts/motion_planning/step5c_slider_motion_plan.py --device cuda:0"
+        " scripts/motion_planning/step6a_save_trajectory.py --device cuda:0"
     )
     sys.exit(1)
 
@@ -72,7 +53,7 @@ import argparse
 
 from isaaclab.app import AppLauncher
 
-parser = argparse.ArgumentParser(description="Step 5c: slider target picking + cuRobo motion planning.")
+parser = argparse.ArgumentParser(description="Step 6a: slider target picking + cuRobo motion planning, with trajectory save.")
 AppLauncher.add_app_launcher_args(parser)
 # under the CUDA_VISIBLE_DEVICES=1 isolation enforced above, physical GPU1 (cuda:1) is
 # remapped to index 0 for this process -- so cuda:0 here is the correct, safe target
@@ -83,6 +64,9 @@ app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 """Rest everything follows."""
+
+import datetime
+import json
 
 import torch
 import omni.ui as ui
@@ -111,20 +95,14 @@ from isaaclab_assets import FRANKA_PANDA_HIGH_PD_CFG  # isort:skip
 from curobo.types.base import TensorDeviceType  # isort:skip
 from curobo.types.math import Pose  # isort:skip
 from curobo.types.state import JointState  # isort:skip
+from curobo.util.usd_helper import UsdHelper  # isort:skip
 from curobo.wrap.reacher.motion_gen import MotionGen, MotionGenConfig, MotionGenPlanConfig  # isort:skip
 
 GRIPPER_OPEN = 0.04
 
-# Slider ranges are tied to the Franka's actual measured reach envelope (~0.855m total), unlike
-# step5b/step1_mouse_control_teleop.py's ranges, which just mirror the original PyBullet
-# mouse_control() tool's arbitrary addUserDebugParameter bounds. The worst-case corner
-# (0.5, 0.25, 0.5) -- all three sliders maxed simultaneously -- has radius sqrt(0.5^2+0.25^2+0.5^2)
-# = 0.75m, ~88% of the measured max reach: enough margin below the hard 0.855m limit to stay clear
-# of near-singular/marginal-IK territory (the Y=+-0.4 test that produced a ~27cm position error was
-# a (0.5, 0.4, 0.5) target at radius 0.812m, ~95% of the hard limit -- this box excludes that
-# combination outright). X's lower bound (0.2) avoids the near-base self-collision zone; Z's lower
-# bound (0.0) matches the floor-collision boundary already established in step3
-# (ground_collision_test.py's TEST1 shows Z<0 fails due to the ground plane, not reach).
+# Slider ranges are tied to the Franka's actual measured reach envelope (~0.855m total) --
+# unchanged from step5c. See step5c_slider_motion_plan.py for the full derivation: the worst-case
+# corner (0.5, 0.25, 0.5) has radius 0.75m, ~88% of the measured max reach.
 POS_X_RANGE = (0.2, 0.5)
 POS_Y_RANGE = (-0.25, 0.25)
 POS_Z_RANGE = (0.0, 0.5)
@@ -148,6 +126,10 @@ DUMMY_FAR_AWAY_WORLD = {
         }
     }
 }
+
+# Where planned trajectories get saved -- a sibling directory next to this script, so it works
+# regardless of the working directory isaaclab.sh is launched from.
+TRAJECTORY_SAVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trajectories")
 
 
 @configclass
@@ -181,7 +163,7 @@ class SliderTargetWindow:
     """
     Slider UI that only ever picks a target -- it never drives the robot.
 
-    Copied unchanged from step5b_slider_no_live_move.py: there is no reference to the robot's
+    Copied unchanged from step5c_slider_motion_plan.py: there is no reference to the robot's
     write_*/set_*_target methods anywhere in this class. Reading the sliders (read_target_pos) is
     a pure UI read; the only things it feeds are the displayed label (update_label) and the
     confirmed-target snapshot taken on button click (_on_confirm). Neither touches the simulation.
@@ -333,7 +315,7 @@ def run_test(sim: sim_utils.SimulationContext, scene: InteractiveScene) -> None:
     print(f"\n[STEP 4] Final confirmed target pose (base frame): {target_pos_t.cpu().numpy().tolist()}")
 
     scene.reset_to(saved_state)
-    sim.forward()  # kinematics-only update, no physics step -- same pattern as step5a/5b
+    sim.forward()  # kinematics-only update, no physics step -- same pattern as step5a/5b/5c
     restored_joint_pos = robot.data.joint_pos[0, arm_joint_ids]
     restore_diff = (restored_joint_pos - saved_joint_pos).abs().max().item()
     print(f"[STEP 4] Restored baseline. Post-restore joint_pos: {restored_joint_pos.cpu().numpy().tolist()}")
@@ -358,7 +340,7 @@ def run_test(sim: sim_utils.SimulationContext, scene: InteractiveScene) -> None:
     result = motion_gen.plan_single(start_state, goal_pose, plan_config)
 
     # ------------------------------------------------------------------
-    # STEP 5: report and execute.
+    # STEP 5: report, SAVE the trajectory (new), then execute.
     # ------------------------------------------------------------------
     success = bool(result.success.item())
     if not success:
@@ -373,6 +355,53 @@ def run_test(sim: sim_utils.SimulationContext, scene: InteractiveScene) -> None:
     plan = result.interpolated_plan
     n_waypoints = len(plan.position)
     print(f"[PLAN] SUCCESS. Waypoints: {n_waypoints}, total planning time: {result.total_time:.3f}s")
+
+    # ------------------------------------------------------------------
+    # SAVE (new): cuRobo's own trajectory export, the same call its own
+    # examples/motion_gen_api_example.py makes after a successful plan_single(). Not a bare .npy
+    # array -- a labeled USD animation (joint names + keyframed drive targets per waypoint).
+    # ------------------------------------------------------------------
+    os.makedirs(TRAJECTORY_SAVE_DIR, exist_ok=True)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_path = os.path.join(TRAJECTORY_SAVE_DIR, f"step6a_trajectory_{timestamp}.usd")
+
+    print(f"[SAVE] Saving planned trajectory ({n_waypoints} waypoints) to: {save_path}")
+    UsdHelper.write_trajectory_animation_with_robot_usd(
+        "franka.yml",
+        None,
+        start_state,
+        plan,
+        dt=result.interpolation_dt,
+        save_path=save_path,
+        tensor_args=tensor_args,
+        base_frame="/world",
+    )
+    if os.path.exists(save_path):
+        print(f"[SAVE] Confirmed on disk: {save_path} ({os.path.getsize(save_path)} bytes)")
+        print(f"[SAVE] Waypoints saved: {n_waypoints}")
+    else:
+        print(f"[ERROR] Trajectory save call returned but no file exists at {save_path} -- save FAILED.")
+
+    # ------------------------------------------------------------------
+    # SAVE (new): plain JSON dump of the actual trajectory data, since the USD save above is
+    # visual-only (baked link-pose keyframes, not a programmatically-reloadable joint trajectory
+    # -- confirmed by reading UsdHelper's source). This is what step6b/6c actually load back.
+    # Same timestamp/basename as the .usd file so it's clear they're the same recorded trajectory.
+    # ------------------------------------------------------------------
+    json_path = os.path.join(TRAJECTORY_SAVE_DIR, f"step6a_trajectory_{timestamp}.json")
+    trajectory_data = {
+        "joint_names": plan.joint_names,
+        "position": plan.position.cpu().numpy().tolist(),
+        "velocity": plan.velocity.cpu().numpy().tolist() if plan.velocity is not None else None,
+        "interpolation_dt": float(result.interpolation_dt),
+    }
+    print(f"[SAVE] Saving trajectory data (JSON) to: {json_path}")
+    with open(json_path, "w") as f:
+        json.dump(trajectory_data, f, indent=2)
+    if os.path.exists(json_path):
+        print(f"[SAVE] Confirmed on disk: {json_path} ({os.path.getsize(json_path)} bytes)")
+    else:
+        print(f"[ERROR] JSON save call returned but no file exists at {json_path} -- save FAILED.")
 
     print(f"[EXEC] Starting trajectory execution ({n_waypoints} waypoints)...")
     gripper_targets = torch.full((scene.num_envs, len(gripper_joint_ids)), GRIPPER_OPEN, device=sim.device)
