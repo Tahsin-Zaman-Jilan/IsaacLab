@@ -10,9 +10,11 @@ This is the actual "trajectory playback" milestone: step6a proved a successful p
 recorded to disk, step6b proved the recorded JSON reads back correctly. This script proves the
 recorded data alone -- no MotionGen, no re-planning -- is enough to reproduce the robot's motion.
 
-Setup is the same bare, ground-mounted robot scene as step6a (ground + light + single Franka, no
-other objects, no sliders). Loading uses the same JSON format and file-discovery pattern already
-proven in step6b (find_most_recent_trajectory / --file).
+Setup is the same bare, ground-mounted robot scene as step6a (ground + light + single Franka), plus
+one fixed 5cm cube (same size/position as step5d_slider_reach_object.py) as a visual/measurement
+reference -- the cube is not a cuRobo obstacle and plays no role in the playback logic, since this
+script does no planning at all. Loading uses the same JSON format and file-discovery pattern
+already proven in step6b (find_most_recent_trajectory / --file).
 
 No cuRobo import anywhere in this file, so none of the multi-GPU device-threading workaround that
 step2/step6a require applies here (that workaround exists specifically for cuRobo's internal
@@ -65,7 +67,7 @@ simulation_app = app_launcher.app
 import torch
 
 import isaaclab.sim as sim_utils
-from isaaclab.assets import AssetBaseCfg
+from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
 from isaaclab.utils import configclass
@@ -77,10 +79,17 @@ GRIPPER_OPEN = 0.04
 
 TRAJECTORY_SAVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trajectories")
 
+# Same cube as step5d_slider_reach_object.py: 5cm cube, bottom face resting exactly on the Z=0
+# ground plane (half the cube height above it). Purely visual/measurement here -- replay doesn't
+# plan around it, so it is not registered as a cuRobo obstacle (there is no cuRobo in this script
+# at all).
+CUBE_SIZE = (0.05, 0.05, 0.05)
+CUBE_POSITION = (0.35, 0.0, 0.025)
+
 
 @configclass
 class BareRobotSceneCfg(InteractiveSceneCfg):
-    """Minimal scene: ground plane, light, single Franka. No other objects. Same as step6a."""
+    """Minimal scene: ground plane, light, single Franka, one fixed cube. Same as step6a plus cube."""
 
     ground = AssetBaseCfg(prim_path="/World/defaultGroundPlane", spawn=sim_utils.GroundPlaneCfg())
     dome_light = AssetBaseCfg(
@@ -88,6 +97,18 @@ class BareRobotSceneCfg(InteractiveSceneCfg):
     )
 
     robot = FRANKA_PANDA_HIGH_PD_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+
+    cube = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/Cube",
+        spawn=sim_utils.CuboidCfg(
+            size=CUBE_SIZE,
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(),
+            mass_props=sim_utils.MassPropertiesCfg(mass=0.1),
+            collision_props=sim_utils.CollisionPropertiesCfg(),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.1, 0.1)),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=CUBE_POSITION),
+    )
 
 
 def reset_to_default_pose(sim: sim_utils.SimulationContext, scene: InteractiveScene, robot) -> None:
@@ -116,8 +137,23 @@ def find_most_recent_trajectory(directory: str) -> str:
 
 def run_test(sim: sim_utils.SimulationContext, scene: InteractiveScene, file_path: str) -> None:
     robot = scene["robot"]
+    cube = scene["cube"]
     print(f"[INFO] Scene ready. Entities: {list(scene.keys())}")
     print(f"[INFO] Robot '{robot.cfg.prim_path}' spawned with {robot.num_joints} joints.")
+
+    # ------------------------------------------------------------------
+    # STEP 0: print the cube's exact spawn position -- world frame and the robot's base frame,
+    # same pattern as step5d_slider_reach_object.py. Purely a visual/measurement reference for this
+    # replay; not used anywhere in the playback logic below.
+    # ------------------------------------------------------------------
+    cube_pos_w = cube.data.root_pos_w[0].clone()
+    root_pose_w = robot.data.root_pose_w
+    cube_pos_b, _ = subtract_frame_transforms(
+        root_pose_w[:, 0:3], root_pose_w[:, 3:7],
+        cube_pos_w.unsqueeze(0), root_pose_w[:, 3:7],
+    )
+    print(f"\n[STEP 0] Cube spawn position (world frame): {cube_pos_w.cpu().numpy().tolist()}")
+    print(f"[STEP 0] Cube spawn position (robot base frame): {cube_pos_b[0].cpu().numpy().tolist()}")
 
     # ------------------------------------------------------------------
     # STEP 1: load the saved trajectory (pure data load, same fields as step6b).
@@ -141,14 +177,15 @@ def run_test(sim: sim_utils.SimulationContext, scene: InteractiveScene, file_pat
     # Resolve joint indices by NAME rather than assuming any particular index order matches the
     # saved data -- this script has no MotionGen object to cross-check joint order against, unlike
     # step6a, so it must not assume cuRobo's arm-joint order lines up with any locally-resolved
-    # joint_ids without checking.
-    arm_joint_ids, resolved_names = robot.find_joints(joint_names)
-    if resolved_names != joint_names:
-        print(
-            f"[ERROR] Resolved joint order {resolved_names} does not match saved joint_names "
-            f"{joint_names} -- refusing to replay with a potentially wrong joint mapping."
-        )
-        sys.exit(1)
+    # joint_ids without checking. preserve_order=True is required here, not optional: without it,
+    # find_joints returns matches in the ARTICULATION's own internal joint order, not the order of
+    # joint_names -- so arm_joint_ids[i] would not line up with position_t[:, i] below, silently
+    # driving the wrong joint to the wrong target even when every name matches correctly.
+    # find_joints (via isaaclab.utils.string.resolve_matching_names) already raises ValueError if
+    # any name in joint_names has no exact match in the robot's joint list, so no separate
+    # existence check is needed here.
+    arm_joint_ids, resolved_names = robot.find_joints(joint_names, preserve_order=True)
+    print(f"[STEP 1] Resolved joint indices (order-matched to saved joint_names): {arm_joint_ids}")
     gripper_joint_ids, _ = robot.find_joints(["panda_finger_joint.*"])
 
     position_t = torch.tensor(position, device=sim.device, dtype=torch.float32)
@@ -237,7 +274,7 @@ def main() -> None:
         scene = InteractiveScene(scene_cfg)
 
         sim.reset()
-        print("[INFO] Setup complete. Bare Franka scene created (no cube, no table, no extra objects).")
+        print("[INFO] Setup complete. Bare Franka scene created, plus one fixed cube (visual reference only).")
     except Exception as e:
         print(f"[ERROR] Failed to set up simulation/scene: {e}")
         simulation_app.close()

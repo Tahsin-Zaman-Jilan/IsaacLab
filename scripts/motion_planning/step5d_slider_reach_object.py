@@ -66,6 +66,9 @@ simulation_app = app_launcher.app
 
 """Rest everything follows."""
 
+import datetime
+import json
+
 import torch
 import omni.ui as ui
 
@@ -141,6 +144,11 @@ DUMMY_FAR_AWAY_WORLD = {
 # gravity/collision physics instead of floating or clipping through the floor.
 CUBE_SIZE = (0.05, 0.05, 0.05)
 CUBE_POSITION = (0.35, 0.0, 0.025)
+
+# Where planned trajectories get saved -- same directory step6a/step6b/step6c already read from,
+# so a step5d run (a real cube-reach target, not an arbitrary empty-space slider pick) produces a
+# loadable trajectory file too.
+TRAJECTORY_SAVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trajectories")
 
 
 @configclass
@@ -399,6 +407,29 @@ def run_test(sim: sim_utils.SimulationContext, scene: InteractiveScene) -> None:
     plan = result.interpolated_plan
     n_waypoints = len(plan.position)
     print(f"[PLAN] SUCCESS. Waypoints: {n_waypoints}, total planning time: {result.total_time:.3f}s")
+
+    # ------------------------------------------------------------------
+    # SAVE (new): plain JSON dump of the trajectory data, same format/fields step6a saves and
+    # step6b/step6c already load -- so this run (aimed at a real cube, not an arbitrary
+    # empty-space target) produces a loadable trajectory file too. Same placement as step6a: after
+    # [PLAN] SUCCESS, before execution.
+    # ------------------------------------------------------------------
+    os.makedirs(TRAJECTORY_SAVE_DIR, exist_ok=True)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    json_path = os.path.join(TRAJECTORY_SAVE_DIR, f"step5d_trajectory_{timestamp}.json")
+    trajectory_data = {
+        "joint_names": plan.joint_names,
+        "position": plan.position.cpu().numpy().tolist(),
+        "velocity": plan.velocity.cpu().numpy().tolist() if plan.velocity is not None else None,
+        "interpolation_dt": float(result.interpolation_dt),
+    }
+    print(f"[SAVE] Saving trajectory data (JSON) to: {json_path}")
+    with open(json_path, "w") as f:
+        json.dump(trajectory_data, f, indent=2)
+    if os.path.exists(json_path):
+        print(f"[SAVE] Confirmed on disk: {json_path} ({os.path.getsize(json_path)} bytes)")
+    else:
+        print(f"[ERROR] JSON save call returned but no file exists at {json_path} -- save FAILED.")
 
     print(f"[EXEC] Starting trajectory execution ({n_waypoints} waypoints)...")
     gripper_targets = torch.full((scene.num_envs, len(gripper_joint_ids)), GRIPPER_OPEN, device=sim.device)
